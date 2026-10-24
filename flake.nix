@@ -91,6 +91,7 @@
       # ── 沙盒：nixos-container 用它跑，验证模块能求值能起服务 ──────────────
       nixosConfigurations.sandbox = nixpkgs.lib.nixosSystem {
         inherit system;
+        specialArgs = { inherit inputs; };
         modules = [ ./examples/sandbox-configuration.nix ];
       };
 
