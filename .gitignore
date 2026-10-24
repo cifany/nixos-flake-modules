@@ -1,0 +1,9 @@
+# 内核编译产物（150MB+，走 Release 或自己的二进制缓存，不进 git）
+dist/
+# 二进制缓存 / 签名私钥（私钥永不入库）
+cache/
+keys/
+# 本地 result 链接与临时文件
+result
+result-*
+.tmp
