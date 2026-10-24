@@ -1,0 +1,129 @@
+diff --git a/src/audio.rs b/src/audio.rs
+index ccb4a86..9ca497c 100644
+--- a/src/audio.rs
++++ b/src/audio.rs
+@@ -34,8 +34,16 @@ fn spawn_encoder(source: &str) -> Result<Child, String> {
+         Some(root) => { let mut c = Command::new(root.join("bin/ffmpeg")); c.env("LD_LIBRARY_PATH", root.join("lib/x86_64-linux-gnu")); c }
+         None => Command::new("ffmpeg"),
+     };
++    // `-f pulse` hands FFmpeg samples that arrive in bursts: with the previous 1920-byte
++    // fragment and no resampler the encoder received 2.9-12% fewer samples than the wall clock,
++    // while the Ogg granule still advanced by real time. The viewer then saw packets whose
++    // timestamps ran ahead of their content, which its jitter buffer turns into a periodic
++    // gap/stutter (heard as crackling) and a growing A/V offset. aresample=async=1 rebuilds the
++    // timeline from the sample count (pads/trims against the nominal rate), which measured
++    // -0.2% instead of +2.9..+12% and is stable across runs.
+     command.args(["-hide_banner", "-loglevel", "error", "-nostdin",
+             "-f", "pulse", "-fragment_size", "1920", "-i", source, "-vn",
++            "-af", "aresample=48000:async=1:min_hard_comp=0.01",
+             "-c:a", "libopus", "-ar", "48000", "-ac", "2", "-b:a", "128k", "-application", "lowdelay",
+             "-frame_duration", "20", "-page_duration", "20000", "-flush_packets", "1", "-f", "ogg", "pipe:1"])
+         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+diff --git a/src/capture_setting.rs b/src/capture_setting.rs
+index ad7c15a..a2b8e1b 100644
+--- a/src/capture_setting.rs
++++ b/src/capture_setting.rs
+@@ -128,6 +128,13 @@ pub fn handle_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, na
+ /// lists H265 first in its offer) and a hardware encoder is selected. Software libx265 is about ten
+ /// times slower than libx264 (measured 15 vs 155 fps at 1080p on a 4-core ARM host, #59), so CPU
+ /// hosts default to H.264. UU_VIDEO_CODEC=h264 / h265 overrides.
++
++/// True when UU_VIDEO_CODEC pins H.264. A forced codec must also survive the viewer's
++/// per-connection codec request, not just the initial negotiation.
++fn codec_forced_to_h264() -> bool {
++    std::env::var("UU_VIDEO_CODEC").ok().is_some_and(|v| v.eq_ignore_ascii_case("h264"))
++}
++
+ pub fn preferred_codec(h264: bool, h265: bool) -> VideoCodec {
+     let forced = std::env::var("UU_VIDEO_CODEC").ok().map(|v| v.to_ascii_lowercase());
+     pick_codec(h264, h265, forced.as_deref(), crate::video::Encoder::requested() != crate::video::Encoder::Cpu)
+@@ -167,7 +174,9 @@ fn apply_rpc(rpc: &[WireField], settings: &watch::Sender<VideoSettings>, native:
+         // codec_type 13 (1 H264, 2 H265): like the official host (negotiateCodec), the host picks the
+         // codec from both capability lists; the Mac viewer sends its current codec (1 while receiving
+         // H.264), so only an explicit H.265 request switches, never one absent from the m-line.
+-        if number(&fields, 13) == Some(2) && h265 { next.codec = VideoCodec::H265; }
++        // UU_VIDEO_CODEC pins the codec: without this check the viewer's H.265 request overrode it
++        // mid-session, and a software host then ran libx265 at ~36 fps for a 60 fps stream.
++        if number(&fields, 13) == Some(2) && h265 && !codec_forced_to_h264() { next.codec = VideoCodec::H265; }
+         // Field 1 is the viewer's fps option index (1 = 30, 2 = 60, ...); 18 fpsCount is the frame rate.
+         if let Some(fps) = number(&fields, 18).filter(|v| *v > 0).or_else(|| number(&fields, 1).and_then(fps_from_option)) { next.fps = fps as u32; }
+         if let Some(quality) = number(&fields, 2).filter(|v| *v > 0) { next.quality = quality; }
+@@ -560,6 +569,23 @@ mod codec_tests {
+         assert_eq!(rx.borrow().codec, VideoCodec::H265);
+         assert_eq!(preferred_codec(true, false), VideoCodec::H264);
+     }
++    /// A pinned UU_VIDEO_CODEC must survive the viewer's per-connection request, not just the
++    /// initial negotiation: the Mac viewer asks for H.265 on every connect, and honouring it on a
++    /// software host dropped the stream to libx265's ~36 fps (and broke it outright when the H.265
++    /// m-line was not negotiated).
++    #[test]
++    fn forced_codec_is_not_overridden_by_the_viewer() {
++        let (tx, rx) = watch::channel(VideoSettings { codec: VideoCodec::H264, ..VideoSettings::default() });
++        let h265_request = decode_wire(&[18, 2, 104, 2]).unwrap();
++        std::env::set_var("UU_VIDEO_CODEC", "h264");
++        handle_rpc_with_codecs(&h265_request, &tx, (1920,1080), true, true).unwrap();
++        assert_eq!(rx.borrow().codec, VideoCodec::H264, "UU_VIDEO_CODEC=h264 must pin the codec");
++        // Unset: the viewer's request is still honoured (upstream behaviour).
++        std::env::remove_var("UU_VIDEO_CODEC");
++        handle_rpc_with_codecs(&h265_request, &tx, (1920,1080), true, true).unwrap();
++        assert_eq!(rx.borrow().codec, VideoCodec::H265);
++    }
++
+     #[test]
+     fn software_hosts_default_to_h264_unless_forced() {
+         assert_eq!(pick_codec(true, true, None, true), VideoCodec::H265);
+diff --git a/src/video.rs b/src/video.rs
+index c21555d..5502efd 100644
+--- a/src/video.rs
++++ b/src/video.rs
+@@ -222,12 +222,21 @@ fn vaapi_filter(output: Option<(u32, u32)>) -> String {
+     format!("{scale}format=nv12,hwupload")
+ }
+ fn vaapi_options(settings: &VideoSettings, gop: &str) -> Vec<String> {
+-    let (maxrate, buffer) = rate_args(settings, Encoder::Vaapi);
+-    // QVBR is not uniformly available on Intel/AMD drivers. VBR + qmin sets a quality
+-    // floor while retaining the viewer's bitrate cap; unsupported drivers fall back to CPU.
++    // QVBR is not uniformly available on Intel/AMD drivers, so this stays ICQ (constant quality),
++    // which every Intel/AMD VAAPI driver implements.
++    //
++    // VBR + qmin was the previous mode and it made a static desktop pulse: measured on an Intel
++    // i3-10105 (iHD), 120 identical frames encoded with `-rc_mode VBR -b:v 1500k -maxrate 2000k
++    // -bufsize 2000k -qmin 26` decoded to a pixel whose R alternated 219 -> 239 (7 distinct values
++    // over the run, one step at every IDR). The rate controller starves the frame budget, each
++    // keyframe gets quantized hard, and the following P-frames slowly refine it - a 20/255 luma
++    // swing at every GOP, which is exactly the "screen keeps changing colour / flickering" report.
++    // ICQ holds one quality level for the whole GOP: the same 120 frames decode to a single value
++    // (0 changes, R range 0). CBR was better than VBR (3 changes) but still moved the brightness.
++    // `-global_quality` is the ICQ knob and takes the same CQ number the presets already produce.
++    let quality = settings.cq().to_string();
+     let mut options: Vec<String> = ["-c:v", Encoder::Vaapi.name_for(settings.codec), "-profile:v", profile_for(settings.codec, true),
+-        "-g", gop, "-bf", "0", "-rc_mode", "VBR", "-b:v", &settings.max_kbps().map_or("16M".into(), |k| format!("{}k",k*3/4)),
+-        "-maxrate", &maxrate, "-bufsize", &buffer, "-qmin", &settings.cq().to_string(), "-async_depth", "1"]
++        "-g", gop, "-bf", "0", "-rc_mode", "ICQ", "-global_quality", &quality, "-async_depth", "1"]
+         .into_iter().map(str::to_owned).collect();
+     // h264_vaapi writes an AUD per picture and the reader splits access units on it. hevc_vaapi
+     // does not: with `-aud 1` it writes an AUD only at IRAPs and drops every other picture from
+@@ -1309,6 +1318,10 @@ mod tests {
+             assert!(options.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]));
+         }
+         assert!(!options.iter().any(|v| v == "-r" || v == "-pix_fmt"));
++        // Constant quality, never a bitrate-targeted mode: VBR re-quantized every IDR and made a
++        // static desktop's luma swing 20/255 once per GOP (measured, see vaapi_options).
++        assert!(options.windows(2).any(|w| w[0] == "-rc_mode" && w[1] == "ICQ"));
++        assert!(!options.iter().any(|v| v == "-b:v" || v == "-maxrate" || v == "-bufsize" || v == "-qmin"));
+     }
+ 
+     #[tokio::test]
+@@ -1497,8 +1510,10 @@ mod tests {
+             assert!(params.split(':').any(|value| value == option));
+         }
+         let vaapi = vaapi_options(&settings, "30");
+-        for pair in [["-c:v", "hevc_vaapi"], ["-profile:v", "main"], ["-bf", "0"], ["-bufsize", "500k"]] {
+-            assert!(vaapi.windows(2).any(|window| window == pair));
++        // ICQ has no VBV buffer, so the old ["-bufsize", "500k"] pair is gone with the VBR mode.
++        for pair in [["-c:v", "hevc_vaapi"], ["-profile:v", "main"], ["-bf", "0"],
++            ["-rc_mode", "ICQ"], ["-global_quality", &settings.cq().to_string()]] {
++            assert!(vaapi.windows(2).any(|window| window == pair), "{pair:?}");
+         }
+         // hevc_vaapi with -aud drops every non-IRAP picture, so H.265 must not ask for AUDs.
+         assert!(!vaapi.iter().any(|option| option == "-aud"));
