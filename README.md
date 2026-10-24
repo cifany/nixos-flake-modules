@@ -1,0 +1,210 @@
+# nixos-flake-modules
+
+cifany 的 NixOS 模块集。每个模块都是「装包 + systemd 常驻 + 踩坑注释」的完整一套，
+可以直接 import 进任何 NixOS flake，也可以只抄走 `pkgs/` 里的包定义。
+
+| 模块 | 干什么 | 依赖 |
+|---|---|---|
+| `maibot` | 麦麦 MaiBot（QQ 智能体），PyPI wheel + 可写 venv + systemd | uv / python312 |
+| `snowluma` | SnowLuma（QQ → OneBot v11 网关），Xvfb + VNC + ptrace 注入 | nodejs / QQ |
+| `openlist` | OpenList（网盘聚合 / WebDAV），systemd 常驻 | — |
+| `cloudflared-tunnel` | Cloudflare Tunnel（token 模式），公网入口不用开端口 | — |
+| `gaming-proton` | Proton-CachyOS（Steam 兼容工具 + umu 独立运行） | — |
+| `uu-remote` | uu-remote-linux 被控端（Wayland 键鼠注入走 uinput） | — |
+
+外加 CachyOS 内核（BORE 调度 + x86-64-v3）的 overlay 与产物构建。
+
+## 拉取配置
+
+### 1. 加 input
+
+`flake.nix`：
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+
+    nixos-flake-modules = {
+      url = "github:cifany/nixos-flake-modules";
+      # 模块只用 nixpkgs，跟着你的走，避免求值两份
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    # 只有要用 CachyOS 内核才需要这个。
+    # 刻意不 follows：内核补丁跟 nixpkgs 版本强绑，换掉它自带的 nixpkgs
+    # 就缓存不命中，只能本地从头编一个内核（几小时）。
+    nix-cachyos-kernel.url = "github:xddxdd/nix-cachyos-kernel/release";
+  };
+
+  outputs = inputs @ { nixpkgs, nixos-flake-modules, ... }: {
+    nixosConfigurations.yourhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      specialArgs = { inherit inputs; };   # 配置里要用 inputs.self 就得传
+      modules = [
+        ./configuration.nix
+        ./hardware-configuration.nix
+      ];
+    };
+  };
+}
+```
+
+### 2. 在你的 configuration.nix 里 import
+
+```nix
+{ config, pkgs, inputs, ... }:
+
+{
+  imports = [
+    inputs.nixos-flake-modules.nixosModules.maibot
+    inputs.nixos-flake-modules.nixosModules.openlist
+    # 不用的删掉就行，模块之间互不依赖
+  ];
+
+  services.maibot.enable = true;
+  services.openlist = {
+    enable = true;
+    user = "youruser";            # ← 改成你自己的普通用户
+    workDir = "/home/youruser";   # ← 必须等于上面那个用户的家目录
+  };
+}
+```
+
+完整示例见 [`examples/example-configuration.nix`](examples/example-configuration.nix)。
+
+### 3. 不用 flake 的场合
+
+`pkgs/` 里的包都是普通 `callPackage` 风格，直接抄走即可：
+
+```nix
+pkgs.callPackage ./pkgs/maibot.nix { }
+```
+
+## 只想要包，不要模块
+
+```bash
+# 单包构建
+nix build github:cifany/nixos-flake-modules#maibot
+nix build github:cifany/nixos-flake-modules#snowluma
+nix build github:cifany/nixos-flake-modules#proton-cachyos
+nix build github:cifany/nixos-flake-modules#uu-remote-linux
+
+# CachyOS 内核产物（bzImage + System.map + config + MODULE_VERSION）
+nix build github:cifany/nixos-flake-modules#cachyos-kernel-artifacts
+```
+
+拿进本地 store（离线的机器也能用）：
+
+```bash
+nix copy --from github:cifany/nixos-flake-modules#maibot --to /tmp/nix-cache
+```
+
+## 沙盒测试
+
+仓库自带一套沙盒系统，专门验证「模块能不能求值、服务能不能起来」，
+不会碰宿主机任何配置：
+
+```bash
+# ① 先只求值（最快要几十秒，第一次要拉依赖）
+nix eval .#nixosConfigurations.sandbox.config.system.build.toplevel.drvPath
+
+# ② 构建整套系统
+nix build .#nixosConfigurations.sandbox.config.system.build.toplevel
+
+# ③ 起一个一次性容器（需要 boot.enableContainers = true）
+sudo nixos-container create sb --flake "$PWD#sandbox"
+sudo nixos-container start sb
+sudo nixos-container run sb -- systemctl is-system-running
+sudo nixos-container run sb -- systemctl status openlist --no-pager
+sudo nixos-container run sb -- curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5244
+
+# ④ 收工
+sudo nixos-container destroy sb
+```
+
+沙盒里默认只开 OpenList（能验证「包能装、服务能起、端口能通」），
+MaiBot / SnowLuma / uu-remote 只 import 不求值它们的重量级依赖 —— 那几个动辄几百 MB。
+
+## 模块要点（都是踩过才知道的）
+
+### maibot
+
+- 安装版必须 `maibot run --directory <实例目录>` 启动，配置/数据/插件全在实例目录；
+  程序目录在 `/nix/store` 里只读，正好符合 NixOS 的路子。
+- 首次启动会阻塞在 stdin 等用户敲「同意」，systemd 下 stdin 不是 tty 会直接 EOF 崩。
+  所以协议确认走 `EULA_AGREE` / `PRIVACY_AGREE` 环境变量（值 = 对应 `.md` 的 md5）。
+- 插件市场装插件时会往 `sys.executable` 的 site-packages 里 pip install，而 store 只读。
+  模块在数据目录里搭一个可写 venv 壳子，主程序的包用软链指回 store（只存一份），
+  插件后装的包落在数据目录；每次启动刷新软链，nix 升级后自动指向新路径。
+- 预编译 wheel 自带的 `.so` 在 `site-packages/*.libs/`，RUNPATH 不一定带 `$ORIGIN`，
+  glibc 的 RUNPATH 又不传给依赖 —— 所以把这些目录全塞进 `LD_LIBRARY_PATH`。
+
+### snowluma
+
+- 登录只能扫码，必须一套无头 X + VNC/noVNC 让你看到 QQ 窗口；
+  Xvfb → WM → VNC → QQ → SnowLuma 顺序不能反，所以整条链路塞进一个 unit。
+- hook 靠 ptrace 注入。官方教程让你 `setcap` 给 node，但 store 只读写不进去；
+  改用 systemd 的 `AmbientCapabilities=CAP_SYS_PTRACE`，等效且更干净。
+- QQ 有静默热更新通道，会在后台改字节把 native hook 打坏，
+  所以把 `qqpatch.gtimg.cn` black-hole 掉（`blockQqHotUpdate`）。
+- hook 与 QQ 版本强绑定：3.2.34 上「好友私聊上报」返回 status=-1，收不到私聊，
+  默认钉 3.2.32。
+
+### openlist
+
+- `config.json` 里 `db_file` / `log.name` / `temp_dir` / `bleve_dir` 都是
+  「相对当前工作目录」的路径，不是相对 `--data`。
+  所以 `WorkingDirectory` 必须是跑它的那个用户的家目录，`user` 和 `workDir` 两个选项要配对改。
+- 首次启动才生成 admin 密码，只在日志里打一次：
+  `journalctl -u openlist | grep -i "initial password"`。
+  已有 `data/data.db` 时不会再打，忘了密码用 `OpenList admin set NEW_PASS`。
+
+### cloudflared-tunnel
+
+- token 是账号级凭据，写进 `.nix` 会随配置落进 `/nix/store`（全用户可读）。
+  所以放 `tokenFile`，由 `LoadCredential` 塞进服务私有凭据目录。
+- token 没填时不能让启动变红：`ConditionPathExists` 让 unit 在缺文件时静默跳过。
+- 从面板复制的 `cloudflared service install <token>` 会往 `/etc/systemd/system` 写 unit，
+  NixOS 上会被下次重建覆盖 —— 所以不跑它，只取 token 走声明式。
+
+### gaming-proton
+
+- 上游只发 SLR（Steam Linux Runtime 容器）二进制，native 版只有 AUR 源码包。
+- 32 位图形栈必须自己开（`hardware.graphics.enable32Bit`），Steam 模块不会替你开
+  DXVK 的 d3d9/d3d11 32 位路径。
+- 脱离 Steam 时用 `umu-launcher`（自带 sniper 运行时），不用 `steam-run` 手搓。
+
+### uu-remote
+
+- 是用户级进程，必须活在图形会话里。unit 名不能改：桌面图标和
+  `uuremote-server doctor` 都按 `uuremote-native.service` 这个名字去 `systemctl --user` 找。
+- Wayland 下键鼠注入默认要过 portal 授权，部分布局还会丢符号。
+  给 `/dev/uinput` 打 `uaccess` 标签后改用内核级虚拟键鼠、发物理键码，布局无关。
+  用 `uaccess` 而不是 `uinput` 组：前者 ACL 跟着「本地活跃会话」走，注销即失效。
+
+### CachyOS 内核
+
+- overlay 必须用 `nix-cachyos-kernel` 自己锁的 nixpkgs 求值，否则缓存不命中。
+  这就是这个 input 不能 `follows` 的原因。
+- `cache.xinux.uz` 是 CachyOS 内核的镜像缓存（attic 被入侵下线后接的班），
+  建议加进 `nix.settings.substituters`。
+
+## 内核产物
+
+`dist/` 里是这台机器编出来的 7.2.8 产物，不进 git（150MB+）。
+需要的话从 Release 下载，或者自己构建：
+
+```bash
+nix build .#cachyos-kernel-artifacts
+ls result/    # bzImage  System.map  config-7.2.8  MODULE_VERSION
+```
+
+模块部分（`modules-7.2.8.tar.xz`）体积大且和内核版本强绑，
+一般不用单独拷 —— 用同一个 flake 构建出来的系统自带匹配的模块。
+
+## 许可
+
+各模块/包的许可跟上游走：MaiBot 是 AGPL-3.0，SnowLuma 是 source-available（unfree），
+Proton-CachyOS 是 BSD-3，其余见各文件 `meta.license`。
+本仓库自身的胶水代码随便用。
