@@ -206,11 +206,19 @@ MaiBot / SnowLuma / uu-remote 只 import 不求值它们的重量级依赖 —�
 
 ## 内核产物
 
-`dist/` 里是这台机器编出来的 7.2.8 产物，不进 git（150MB+）。
-需要的话从 Release 下载，或者自己构建：
+这台机器编出来的 7.2.8 产物在 Release 里（不进 git，150MB+）：
+
+**[kernel-7.2.8-cachyos](https://github.com/cifany/nixos-flake-modules/releases/tag/kernel-7.2.8-cachyos)**
+
+| 文件 | 大小 | SHA256 |
+|---|---|---|
+| `cachyos-kernel-7.2.8-x86_64-v3.tar.xz` | 16 MB | `256b9c8c…edb559` |
+| `modules-7.2.8.tar.xz` | 150 MB | `ff25026f…1e39a3` |
+
+自己构建（推荐，版本一定对得上）：
 
 ```bash
-nix build .#cachyos-kernel-artifacts
+nix build github:cifany/nixos-flake-modules#cachyos-kernel-artifacts
 ls result/    # bzImage  System.map  config-7.2.8  MODULE_VERSION
 ```
 
