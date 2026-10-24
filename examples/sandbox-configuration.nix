@@ -1,15 +1,16 @@
 # 沙盒系统：专门用来验证本仓库的模块能不能求值、服务能不能起来。
 # 用法见 README「沙盒测试」。只装模块，不碰宿主机任何配置。
-{ config, lib, pkgs, modulesPath, ... }:
+{ config, lib, pkgs, modulesPath, inputs, ... }:
 
 {
   imports = [
     (modulesPath + "/profiles/minimal.nix")
-    ../modules/maibot.nix
-    ../modules/snowluma.nix
-    ../modules/openlist.nix
-    ../modules/cloudflared-tunnel.nix
-    ../modules/uu-remote.nix
+    # 刻意走「远端拉取」这条路径，验证别人 clone 下来能求值 —— 而不是用本地相对路径
+    inputs.self.nixosModules.maibot
+    inputs.self.nixosModules.snowluma
+    inputs.self.nixosModules.openlist
+    inputs.self.nixosModules.cloudflared-tunnel
+    inputs.self.nixosModules.uu-remote
   ];
 
   # 容器里没有真实硬件，内核模块/udev 相关的断言用不到
