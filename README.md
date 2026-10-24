@@ -112,15 +112,29 @@ nix eval .#nixosConfigurations.sandbox.config.system.build.toplevel.drvPath
 # ② 构建整套系统
 nix build .#nixosConfigurations.sandbox.config.system.build.toplevel
 
-# ③ 起一个一次性容器（需要 boot.enableContainers = true）
-sudo nixos-container create sb --flake "$PWD#sandbox"
-sudo nixos-container start sb
-sudo nixos-container run sb -- systemctl is-system-running
-sudo nixos-container run sb -- systemctl status openlist --no-pager
-sudo nixos-container run sb -- curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5244
+# ③ 起一个一次性容器
+#    注意：nixpkgs 26.05 的 nixos-container 起不来（containerInit 仍用 `. init`
+#    加载 toplevel，而新版 init 已是 ELF），所以这里直接用 systemd-nspawn。
+#    完整步骤与原因见 docs/sandbox-test.md
+SYS=$(nix build --no-link --print-out-paths .#nixosConfigurations.sandbox.config.system.build.toplevel)
+ROOT=/tmp/sbroot
+sudo mkdir -p $ROOT/{usr/bin,var/lib,run,tmp,root,proc,sys,dev,etc,var/empty}
+sudo chmod 1777 $ROOT/tmp
+sudo sh -c "for f in $SYS/etc/*; do ln -sfn \"\$f\" $ROOT/etc/\$(basename \"\$f\"); done"
+sudo sh -c "printf 'root:x:0:0:root:/root:/run/current-system/sw/bin/bash\n' > $ROOT/etc/passwd"
+sudo sh -c "printf 'root:x:0:\nusers:x:100:\n' > $ROOT/etc/group"
+sudo systemd-nspawn -D $ROOT -M sbtest --bind-ro=/nix/store \
+  --bind=$SYS:/run/current-system --bind-ro=/nix/var/nix/db \
+  --private-network --register=no --keep-unit /run/current-system/init &
 
-# ④ 收工
-sudo nixos-container destroy sb
+# ④ 验证（--register=no 时 machinectl 看不到，用 nsenter 进）
+INIT=$(pgrep -f '^/run/current-system/init' | head -1)
+sudo nsenter -t $INIT -m -p -i -- systemctl is-active openlist
+sudo nsenter -t $INIT -m -p -i -- curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5244
+
+# ⑤ 收工
+sudo pkill -f 'systemd-nspawn -D /tmp/sbroot'
+sudo rm -rf $ROOT
 ```
 
 沙盒里默认只开 OpenList（能验证「包能装、服务能起、端口能通」），
