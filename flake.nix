@@ -38,6 +38,9 @@
         maibot = final.callPackage ./pkgs/maibot.nix { };
         snowluma = final.callPackage ./pkgs/snowluma.nix { };
         qq_3_2_32 = final.callPackage ./pkgs/qq-3.2.32.nix { };
+        # 想直接覆盖 nixpkgs 的 qq 就加这个 overlay：
+        #   qq = (final.callPackage ./pkgs/qq-wayland-fix.nix { }).qqPkg;
+        qq-wayland-fix = (final.callPackage ./pkgs/qq-wayland-fix.nix { }).waylandFix;
         proton-cachyos = final.callPackage ./pkgs/proton-cachyos.nix { };
         uu-remote-linux = final.callPackage ./pkgs/uu-remote-linux.nix { };
       };
@@ -51,6 +54,10 @@
           maibot = callPkg ./pkgs/maibot.nix;
           snowluma = callPkg ./pkgs/snowluma.nix;
           "qq-3.2.32" = callPkg ./pkgs/qq-3.2.32.nix;
+
+          # QQ 3.2.34 + Wayland 修复（一个文件出两个包，见 pkgs/qq-wayland-fix.nix）
+          qq = (callPkg ./pkgs/qq-wayland-fix.nix).qqPkg;
+          qq-wayland-fix = (callPkg ./pkgs/qq-wayland-fix.nix).waylandFix;
           proton-cachyos = callPkg ./pkgs/proton-cachyos.nix;
           uu-remote-linux = callPkg ./pkgs/uu-remote-linux.nix;
 
