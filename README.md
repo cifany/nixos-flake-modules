@@ -11,6 +11,7 @@ cifany 的 NixOS 模块集。每个模块都是「装包 + systemd 常驻 + 踩�
 | `cloudflared-tunnel` | Cloudflare Tunnel（token 模式），公网入口不用开端口 | — |
 | `gaming-proton` | Proton-CachyOS（Steam 兼容工具 + umu 独立运行） | — |
 | `uu-remote` | uu-remote-linux 被控端（Wayland 键鼠注入走 uinput） | — |
+| `qq` + `qq-wayland-fix` | QQ 3.2.34 + Wayland 修复（屏幕共享 / 声音 / 剪贴板 / 截图） | — |
 
 外加 CachyOS 内核（BORE 调度 + x86-64-v3）的 overlay 与产物构建。
 
@@ -89,6 +90,8 @@ nix build github:cifany/nixos-flake-modules#maibot
 nix build github:cifany/nixos-flake-modules#snowluma
 nix build github:cifany/nixos-flake-modules#proton-cachyos
 nix build github:cifany/nixos-flake-modules#uu-remote-linux
+nix build github:cifany/nixos-flake-modules#qq              # QQ 3.2.34（unfree）
+nix build github:cifany/nixos-flake-modules#qq-wayland-fix  # 启动器 + 4 个注入库
 
 # CachyOS 内核产物（bzImage + System.map + config + MODULE_VERSION）
 nix build github:cifany/nixos-flake-modules#cachyos-kernel-artifacts
@@ -196,6 +199,49 @@ MaiBot / SnowLuma / uu-remote 只 import 不求值它们的重量级依赖 —�
 - Wayland 下键鼠注入默认要过 portal 授权，部分布局还会丢符号。
   给 `/dev/uinput` 打 `uaccess` 标签后改用内核级虚拟键鼠、发物理键码，布局无关。
   用 `uaccess` 而不是 `uinput` 组：前者 ACL 跟着「本地活跃会话」走，注销即失效。
+
+### qq / qq-wayland-fix
+
+- nixpkgs 26.05 里 `pkgs.qq` 的 deb 直链（3.2.29）已被腾讯下架，404。
+  这里复刻 unstable 的做法：向腾讯签名接口换一个**临时直链**再下载 3.2.34，
+  用 `outputHashMode = "flat"` 固定内容，产物就是那个 `.deb` 本身。
+  腾讯一改包就得换 `qqHash`。
+- Wayland 修复（`linuxqq-wayland-fix`）通过 `LD_PRELOAD` 注入四个库，
+  不改 QQ 自身文件：`libqq-wl-portal.so`（屏幕共享 / 共享设备音频）、
+  `libqq-clipbridge.so`（X11 ↔ Wayland 剪贴板）、`libqq-screenshot.so`（截图防闪退）、
+  `libqq-borderfix.so`（共享时隐藏全屏边框）。
+- 上游 `package.nix` 的 `qqPackage` 参数刻意不叫 `qq` —— `callPackage` 会自动填 `pkgs.qq`。
+  所以 overlay 里覆盖 `qq` 时必须显式传 `qq = prev.qq` 当模板，否则无限递归。
+- 几个 NixOS 特有的补丁（都在上游 `package.nix` 里，这里只是复用）：
+  - `LD_LIBRARY_PATH` 补 pipewire —— `broadcast-core.so` 用裸名 `dlopen("libpipewire-0.3.so.0")`，
+    NixOS 没有全局库目录，不补就静默失败（屏幕共享不弹 portal）。
+  - `EGL_PLATFORM=wayland` —— 否则 glvnd 把 `EGL_DEFAULT_DISPLAY` 交给 Mesa，
+    NVIDIA 闭源驱动下退化成 llvmpipe 软件渲染（实测 12 线程 ~5 个核）。
+  - `VK_DRIVER_FILES` 指向 `/run/opengl-driver/share/vulkan/icd.d` —— 上游只找
+    `/usr/share/vulkan`，NixOS 上永远探测不到。
+  - `LD_LIBRARY_PATH` 追加 `/run/opengl-driver/lib` —— NVENC / AMF / QSV 硬件编解码，
+    不补只能落到 OpenH264 软件编码。
+- **不含用户数据**：登录态在 `~/.config/QQ`，跟包无关，不会进 store。
+
+接进自己的配置：
+
+```nix
+nixpkgs.overlays = [
+  (final: prev: {
+    qq = (final.callPackage "${inputs.nixos-flake-modules}/pkgs/qq-wayland-fix.nix" {
+      qq = prev.qq;      # ← 必须传，否则递归
+    }).qqPkg;
+  })
+];
+
+environment.systemPackages = [
+  inputs.nixos-flake-modules.packages.${pkgs.system}.qq-wayland-fix
+];
+
+# 屏幕共享走 portal，缺了它共享会失败
+xdg.portal.enable = true;
+xdg.portal.extraPortals = [ pkgs.xdg-desktop-portal-gtk ];
+```
 
 ### CachyOS 内核
 
