@@ -199,6 +199,11 @@ MaiBot / SnowLuma / uu-remote 只 import 不求值它们的重量级依赖 —�
 - Wayland 下键鼠注入默认要过 portal 授权，部分布局还会丢符号。
   给 `/dev/uinput` 打 `uaccess` 标签后改用内核级虚拟键鼠、发物理键码，布局无关。
   用 `uaccess` 而不是 `uinput` 组：前者 ACL 跟着「本地活跃会话」走，注销即失效。
+- 依赖锁定用 `cargoLock.lockFile` 而不是 `cargoHash` —— 后者是 FOD，得先编一遍才知道哈希，
+  第一次必然失败；前者按 `Cargo.lock` 里每个 crate 的 checksum 逐个 fetchurl，求值就能过。
+- X11 那几个库摘不掉（`build.rs` 无条件编 `x11_engine.c`），但纯 Wayland 下不会发 X 请求。
+- 四个上游坑的补丁（H.265 覆盖、切码率断流、音频丢样、VAAPI 亮度跳）
+  详见 [`docs/uu-remote.md`](docs/uu-remote.md)。
 
 ### qq / qq-wayland-fix
 
