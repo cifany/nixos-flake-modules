@@ -27,7 +27,17 @@
   # 内核补丁跟 nixpkgs 版本强绑，所以这个 input 刻意不 follows 你的 nixpkgs，
   # 否则缓存不命中、只能本地从头编一个内核（几小时）。
   boot.kernelPackages = pkgs.cachyosKernels.linuxPackages-cachyos-bore-x86_64-v3;
-  nixpkgs.overlays = [ inputs.nix-cachyos-kernel.overlays.pinned ];
+  nixpkgs.overlays = [
+    inputs.nix-cachyos-kernel.overlays.pinned
+    # QQ：nixpkgs 26.05 里的 3.2.29 直链已 404，换成 3.2.34。
+    # 注意要传 prev.qq 当模板 —— 直接 callPackage 会拿到这个 overlay 正在定义的
+    # qq 自己，变成无限递归。
+    (final: prev: {
+      qq = (final.callPackage "${inputs.self}/pkgs/qq-wayland-fix.nix" {
+        qq = prev.qq;
+      }).qqPkg;
+    })
+  ];
 
   # ── MaiBot（麦麦）─────────────────────────────────────────────────────
   services.maibot = {
@@ -58,6 +68,20 @@
     enable = true;
     # token 写进 /etc/cloudflared/tunnel-token（0400），别写进 .nix
     tokenFile = "/etc/cloudflared/tunnel-token";
+  };
+
+  # ── QQ + Wayland 修复 ─────────────────────────────────────────────────
+  # 两件事：① 把 nixpkgs 的 qq 换成 3.2.34（nixpkgs 里的 3.2.29 直链已 404）；
+  #         ② 装上 Wayland 修复启动器（屏幕共享 / 共享电脑声音 / 剪贴板 / 截图闪退）
+  environment.systemPackages = [
+    inputs.self.packages.${pkgs.system}.qq-wayland-fix
+  ];
+
+  # QQ 的屏幕共享走 portal 的 ScreenCast 接口，缺了它共享会失败。
+  # niri / Hyprland 这类合成器还要额外启用对应的后端。
+  xdg.portal = {
+    enable = true;
+    extraPortals = [ pkgs.xdg-desktop-portal-gtk ];
   };
 
   # ── Proton-CachyOS + UU 远程被控端 ────────────────────────────────────
