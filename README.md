@@ -250,6 +250,31 @@ xdg.portal.extraPortals = [ pkgs.xdg-desktop-portal-gtk ];
 - `cache.xinux.uz` 是 CachyOS 内核的镜像缓存（attic 被入侵下线后接的班），
   建议加进 `nix.settings.substituters`。
 
+## uu-remote-linux 二进制缓存
+
+闭包 1.1 GiB（含 ffmpeg / gtk3 / systemd 等），源码编一次几分钟。不想编就用签名缓存：
+
+**[uu-remote-0.2.26](https://github.com/cifany/nixos-flake-modules/releases/tag/uu-remote-0.2.26)**
+
+```bash
+curl -LO https://github.com/cifany/nixos-flake-modules/releases/download/uu-remote-0.2.26/uu-remote-cache.tar.xz
+tar -xf uu-remote-cache.tar.xz          # → ./uu-cache-signed/
+nix copy --from "file://$PWD/uu-cache-signed" --to /nix/store \
+  /nix/store/8avbkig3d4xpfjjsdsbyjd4i39my5s8l-uu-remote-linux-0.2.26
+```
+
+缓存公钥（`docs/uu-remote-cache.pub`，私钥不在仓库里）：
+
+```
+uu-remote-cache-1:4fYQfg0f0tnVLZjB3oqoF7FfFdfZP6hpyC5+NDNdI7g=
+```
+
+加进 `nix.settings.trusted-public-keys` 就能免 `require-sigs`。
+
+| 文件 | 大小 | SHA256 |
+|---|---|---|
+| `uu-remote-cache.tar.xz` | 284 MB | `0e50d5dc…e8c5b` |
+
 ## 内核产物
 
 这台机器编出来的 7.2.8 产物在 Release 里（不进 git，150MB+）：
